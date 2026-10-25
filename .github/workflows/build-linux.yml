@@ -1,0 +1,85 @@
+name: build-linux-appimage
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout overlay (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: self
+
+      - name: Checkout upstream v4.9.8
+        uses: actions/checkout@v4
+        with:
+          repository: lbjlaq/Antigravity-Manager
+          ref: v4.9.8
+          path: src
+
+      - name: Apply overlay
+        run: |
+          set -e
+          cp -v self/overlay/src-tauri/src/proxy/middleware/throttle.rs src/src-tauri/src/proxy/middleware/throttle.rs
+          cp -v self/overlay/src-tauri/src/proxy/middleware/mod.rs     src/src-tauri/src/proxy/middleware/mod.rs
+          cp -v self/overlay/src-tauri/src/proxy/server.rs             src/src-tauri/src/proxy/server.rs
+          echo "--- verify overlay applied ---"
+          grep -n "throttle_middleware" src/src-tauri/src/proxy/server.rs
+          grep -n "pub mod throttle" src/src-tauri/src/proxy/middleware/mod.rs
+          ls -l src/src-tauri/src/proxy/middleware/throttle.rs
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config libsoup-3.0-dev javascriptcoregtk-4.1 libjavascriptcoregtk-4.1-dev libnm-dev xdg-utils
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: src
+        run: npm ci --legacy-peer-deps
+
+      - name: Build frontend (cargo check needs ../dist)
+        working-directory: src
+        run: npm run build
+
+      - name: cargo check (fail fast)
+        working-directory: src/src-tauri
+        run: cargo check
+
+      - name: Disable updater artifacts (no signing key)
+        working-directory: src
+        run: |
+          python3 - <<'PY'
+          import json
+          p = 'src-tauri/tauri.conf.json'
+          with open(p, encoding='utf-8') as f:
+              d = json.load(f)
+          d.setdefault('bundle', {})['createUpdaterArtifacts'] = False
+          with open(p, 'w', encoding='utf-8') as f:
+              json.dump(d, f, indent=2, ensure_ascii=False)
+          print('createUpdaterArtifacts =', d['bundle']['createUpdaterArtifacts'])
+          PY
+
+      - name: tauri build (AppImage only)
+        working-directory: src
+        run: npm run tauri build -- --bundles appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage-v4.9.8-throttle
+          path: src/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
